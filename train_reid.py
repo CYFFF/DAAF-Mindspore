@@ -17,6 +17,7 @@ from mindspore.nn import Accuracy
 from mindspore.train.callback import LossMonitor
 # from mindspore import Model
 
+from data.datasets import init_dataset, ImageDataset, ImageDatasetTrain
 
 import numpy as np
 
@@ -65,26 +66,51 @@ class LeNet5(ms.nn.Cell):
 
 
 
-def train_net(args, model, epoch_size, data_path, repeat_size, ckpoint_cb, sink_mode):
-    """定义训练的方法"""
-    # 加载训练数据集
-    ds_train = create_dataset(os.path.join(data_path, "train"), 32, repeat_size)
-    model.train(epoch_size, ds_train, callbacks=[ckpoint_cb, LossMonitor(125)], dataset_sink_mode=sink_mode)
+class DatasetGenerator:
+    def __init__(self):
+        self.data = np.random.sample((5, 2))
+        self.label = np.random.sample((5, 1))
 
-def test_net(network, model, data_path):
-    """定义验证的方法"""
-    ds_eval = create_dataset(os.path.join(data_path, "test"))
-    acc = model.eval(ds_eval, dataset_sink_mode=False)
-    print("{}".format(acc))
+    def __getitem__(self, index):
+        return self.data[index], self.label[index]
+
+    def __len__(self):
+        return len(self.data)
+
+# def train_net(args, model, epoch_size, data_path, repeat_size, ckpoint_cb, sink_mode):
+#     """定义训练的方法"""
+#     # 加载训练数据集
+#     ds_train = create_dataset(os.path.join(data_path, "train"), 32, repeat_size)
+#     model.train(epoch_size, ds_train, callbacks=[ckpoint_cb, LossMonitor(125)], dataset_sink_mode=sink_mode)
+#
+# def test_net(network, model, data_path):
+#     """定义验证的方法"""
+#     ds_eval = create_dataset(os.path.join(data_path, "test"))
+#     acc = model.eval(ds_eval, dataset_sink_mode=False)
+#     print("{}".format(acc))
 
 
 
 def main():
+
     parser = argparse.ArgumentParser(description='MindSpore LeNet Example')
     parser.add_argument('--device_target', type=str, default="CPU", choices=['Ascend', 'GPU', 'CPU'])
 
     args = parser.parse_known_args()[0]
     ms.context.set_context(mode=ms.context.GRAPH_MODE, device_target=args.device_target)
+
+
+
+    dataset = init_dataset("Market-1501", root="/home/chenyifan/repos/Mirkwood/datasets")
+
+    num_classes = dataset.num_train_pids
+    train_set = ImageDataset(dataset)
+
+
+
+
+
+
 
     # 实例化网络
     net = LeNet5()
@@ -105,10 +131,11 @@ def main():
     mnist_path = "/home/chenyifan/datasets/mnist2"
     dataset_size = 1
     model = ms.Model(net, net_loss, net_opt, metrics={"Accuracy": Accuracy()})
-    train_net(args, model, train_epoch, mnist_path, dataset_size, ckpoint, False)
-    test_net(net, model, mnist_path)
+    # train_net(args, model, train_epoch, mnist_path, dataset_size, ckpoint, False)
+    # test_net(net, model, mnist_path)
 
     return 0
+
 
 if __name__=="__main__":
     main()
