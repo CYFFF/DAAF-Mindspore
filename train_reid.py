@@ -21,16 +21,21 @@ from data.datasets import init_dataset, ImageDataset, ImageDatasetTrain
 
 import numpy as np
 
+
+from src.resnet import resnet50
+
 np.random.seed(58)
 
 
-# dataset_generator = DatasetGenerator()
-# dataset = ms.dataset.GeneratorDataset(dataset_generator, ["data", "label"], shuffle=False)
-#
-# for data in dataset.create_dict_iterator():
-#     print('{}'.format(data["data"]), '{}'.format(data["label"]))
+class ResNet_reID(ms.nn.Cell):
+    def __init__(self, num_class=10, num_channel=1):
+        super(ResNet_reID, self).__init__()
 
 
+    def construct(self, x):
+
+
+        return
 
 class LeNet5(ms.nn.Cell):
     """
@@ -101,15 +106,24 @@ def main():
 
 
 
-    dataset = init_dataset("Market-1501", root="/home/chenyifan/repos/Mirkwood/datasets")
+    dataset_init = init_dataset("Market-1501", root="/home/chenyifan/repos/Mirkwood/datasets")
 
-    num_classes = dataset.num_train_pids
-    train_set = ImageDataset(dataset)
+    num_classes = dataset_init.num_train_pids
+    train_set = ImageDataset(dataset_init.train)
+
+    dataset_train = ms.dataset.GeneratorDataset(train_set, ["img", "pid", "camid", "img_path"], shuffle=False)
 
 
+    resnet = resnet50(1001)
 
-
-
+    model_path = "/home/chenyifan/repos/Mirkwood/DAAF-trinet-mindspore/pretrain-model/resnet50_ascend_v120_imagenet2012_official_cv_bs256_acc76.ckpt"
+    # initialize the number of classes based on the pre-trained model
+    param_dict = ms.load_checkpoint(model_path)
+    param_dict.pop('end_point.weight')
+    param_dict.pop('end_point.bias')
+    param_dict.pop('moments.end_point.weight')
+    param_dict.pop('moments.end_point.bias')
+    ms.load_param_into_net(resnet, param_dict)
 
 
     # 实例化网络
