@@ -591,7 +591,11 @@ class ResNet_reID(nn.Cell):
 
         self.mean = P.ReduceMean(keep_dims=True)
         self.flatten = nn.Flatten()
-        self.end_point = _fc(out_channels[3], num_classes, use_se=self.use_se)
+        # self.end_point = _fc(out_channels[3], num_classes, use_se=self.use_se)
+
+        self.in_planes = 2048
+        self.bnneck = nn.BatchNorm1d(self.in_planes)
+        self.classifier = _fc(self.in_planes, num_classes, use_se=self.use_se)
 
     def _make_layer(self, block, layer_num, in_channel, out_channel, stride, use_se=False, se_block=False):
         """
@@ -650,9 +654,12 @@ class ResNet_reID(nn.Cell):
 
         out = self.mean(c5, (2, 3))
         out = self.flatten(out)
-        out = self.end_point(out)
 
-        return out
+        # out = self.end_point(out)
+        fea = self.bnneck(out)
+        output = self.classifier(fea)
+
+        return fea, output
 
 
 def resnet18(class_num=10):
