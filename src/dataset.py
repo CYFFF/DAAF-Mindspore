@@ -1,4 +1,4 @@
-# Copyright 2020 Huawei Technologies Co., Ltd
+# Copyright 2021 Huawei Technologies Co., Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,388 +12,331 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ============================================================================
-"""
-create train or eval dataset.
-"""
-import multiprocessing
-import mindspore.common.dtype as mstype
+""" ReID dataset processing """
+
+import os
+import pickle
+from collections import defaultdict
+
 import mindspore.dataset as ds
 import mindspore.dataset.vision.c_transforms as C
-import mindspore.dataset.transforms.c_transforms as C2
-from mindspore.communication.management import init, get_rank, get_group_size
+import numpy as np
+from PIL import Image
 
-def create_dataset1(dataset_path, do_train, repeat_num=1, batch_size=32, train_image_size=224, eval_image_size=224,
-                    target="Ascend", distribute=False, enable_cache=False, cache_session_id=None):
-    """
-    create a train or evaluate cifar10 dataset for resnet50
-    Args:
-        dataset_path(string): the path of dataset.
-        do_train(bool): whether dataset is used for train or eval.
-        repeat_num(int): the repeat times of dataset. Default: 1
-        batch_size(int): the batch size of dataset. Default: 32
-        target(str): the device target. Default: Ascend
-        distribute(bool): data for distribute or not. Default: False
-        enable_cache(bool): whether tensor caching service is used for eval. Default: False
-        cache_session_id(int): If enable_cache, cache session_id need to be provided. Default: None
 
-    Returns:
-        dataset
-    """
-    device_num, rank_id = _get_rank_info(distribute)
-    ds.config.set_prefetch_size(64)
-    if device_num == 1:
-        data_set = ds.Cifar10Dataset(dataset_path, num_parallel_workers=get_num_parallel_workers(12), shuffle=True)
+def parse_im_name(im_name, parse_type='id'):
+    """Get the person id or cam from an image name."""
+    assert parse_type in ('id', 'cam')
+    if parse_type == 'id':
+        parsed = int(im_name[:8])
     else:
-        data_set = ds.Cifar10Dataset(dataset_path, num_parallel_workers=get_num_parallel_workers(12), shuffle=True,
-                                     num_shards=device_num, shard_id=rank_id)
-
-    # define map operations
-    trans = []
-    if do_train:
-        trans += [
-            C.RandomCrop((32, 32), (4, 4, 4, 4)),
-            C.RandomHorizontalFlip(prob=0.5)
-        ]
-
-    trans += [
-        C.Resize((train_image_size, train_image_size)),
-        C.Rescale(1.0 / 255.0, 0.0),
-        C.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
-        C.HWC2CHW()
-    ]
-
-    type_cast_op = C2.TypeCast(mstype.int32)
-
-    data_set = data_set.map(operations=type_cast_op, input_columns="label",
-                            num_parallel_workers=get_num_parallel_workers(8))
-    # only enable cache for eval
-    if do_train:
-        enable_cache = False
-    if enable_cache:
-        if not cache_session_id:
-            raise ValueError("A cache session_id must be provided to use cache.")
-        eval_cache = ds.DatasetCache(session_id=int(cache_session_id), size=0)
-        data_set = data_set.map(operations=trans, input_columns="image",
-                                num_parallel_workers=get_num_parallel_workers(8), cache=eval_cache)
-    else:
-        data_set = data_set.map(operations=trans, input_columns="image",
-                                num_parallel_workers=get_num_parallel_workers(8))
-
-    # apply batch operations
-    data_set = data_set.batch(batch_size, drop_remainder=True)
-    # apply dataset repeat operation
-    data_set = data_set.repeat(repeat_num)
-
-    return data_set
+        parsed = int(im_name[9:13])
+    return parsed
 
 
-def create_dataset2(dataset_path, do_train, repeat_num=1, batch_size=32, train_image_size=224, eval_image_size=224,
-                    target="Ascend", distribute=False, enable_cache=False, cache_session_id=None):
-    """
-    create a train or eval imagenet2012 dataset for resnet50
+class TrainReIDSequenceDataset:
+    """ Train dataset
 
     Args:
-        dataset_path(string): the path of dataset.
-        do_train(bool): whether dataset is used for train or eval.
-        repeat_num(int): the repeat times of dataset. Default: 1
-        batch_size(int): the batch size of dataset. Default: 32
-        target(str): the device target. Default: Ascend
-        distribute(bool): data for distribute or not. Default: False
-        enable_cache(bool): whether tensor caching service is used for eval. Default: False
-        cache_session_id(int): If enable_cache, cache session_id need to be provided. Default: None
-
-    Returns:
-        dataset
+        im_dir: path to image folder
+        partition_file: Path to partition pkl file
+        ims_per_id: number of imager per id
+        part: part of data for evaluation
+        rank: process id
+        group_size: device number
+        seed: random seed
     """
-    device_num, rank_id = _get_rank_info(distribute)
+    def __init__(
+            self,
+            im_dir=None,
+            partition_file=None,
+            ims_per_id=None,
+            part='trainval',
+            rank=0,
+            group_size=1,
+            seed=16562,
+    ):
+        # The im dir of all images
+        self.im_dir = im_dir
+        self.ims_per_id = ims_per_id
+        self.group_size = group_size
+        self.rank = rank
 
-    ds.config.set_prefetch_size(64)
-    if device_num == 1:
-        data_set = ds.ImageFolderDataset(dataset_path, num_parallel_workers=get_num_parallel_workers(12), shuffle=True)
-    else:
-        data_set = ds.ImageFolderDataset(dataset_path, num_parallel_workers=get_num_parallel_workers(12), shuffle=True,
-                                         num_shards=device_num, shard_id=rank_id)
+        self.im_names, self.ids2labels = self._get_dataset_values(partition_file, part)
 
-    mean = [0.485 * 255, 0.456 * 255, 0.406 * 255]
-    std = [0.229 * 255, 0.224 * 255, 0.225 * 255]
+        im_ids = [parse_im_name(name, 'id') for name in self.im_names]
+        self.ids_to_im_inds = defaultdict(list)
+        for ind, id_ in enumerate(im_ids):
+            self.ids_to_im_inds[id_].append(ind)
 
-    # define map operations
-    if do_train:
-        trans = [
-            C.RandomCropDecodeResize(train_image_size, scale=(0.08, 1.0), ratio=(0.75, 1.333)),
-            C.RandomHorizontalFlip(prob=0.5),
-            C.Normalize(mean=mean, std=std),
-            C.HWC2CHW()
-        ]
-    else:
-        trans = [
-            C.Decode(),
-            C.Resize(256),
-            C.CenterCrop(eval_image_size),
-            C.Normalize(mean=mean, std=std),
-            C.HWC2CHW()
-        ]
+        self.ids_orig = list(self.ids_to_im_inds.keys())
+        self.ids = self.ids_orig.copy()
 
-    type_cast_op = C2.TypeCast(mstype.int32)
+        self.image_queue, self.label_queue = None, None
+        self.rng = np.random.RandomState(seed)
+        self.reinit_queue(shuffle=False)
 
-    data_set = data_set.map(operations=trans, input_columns="image", num_parallel_workers=get_num_parallel_workers(12))
-    # only enable cache for eval
-    if do_train:
-        enable_cache = False
-    if enable_cache:
-        if not cache_session_id:
-            raise ValueError("A cache session_id must be provided to use cache.")
-        eval_cache = ds.DatasetCache(session_id=int(cache_session_id), size=0)
-        data_set = data_set.map(operations=type_cast_op, input_columns="label",
-                                num_parallel_workers=get_num_parallel_workers(12),
-                                cache=eval_cache)
-    else:
-        data_set = data_set.map(operations=type_cast_op, input_columns="label",
-                                num_parallel_workers=get_num_parallel_workers(12))
+        self.index_shift = len(self) * self.rank
 
-    # apply batch operations
-    data_set = data_set.batch(batch_size, drop_remainder=True)
+    @property
+    def num_classes(self):
+        """ Number of classes in dataset (0 for evaluation) """
+        return len(self.ids2labels)
 
-    # apply dataset repeat operation
-    data_set = data_set.repeat(repeat_num)
+    @staticmethod
+    def _get_dataset_values(partition_file, part='trainval'):
+        """ Get images info from partition_file
 
-    return data_set
+        Args:
+            partition_file: Path to partition pkl file
+            part: part of data for evaluation
 
-def create_dataset_pynative(dataset_path, do_train, repeat_num=1, batch_size=32, train_image_size=224,
-                            eval_image_size=224, target="Ascend", distribute=False, enable_cache=False,
-                            cache_session_id=None):
-    """
-    create a train or eval imagenet2012 dataset for resnet50 benchmark
+        Returns:
+            image names
+            map of ids to labels
+        """
+        with open(partition_file, 'rb') as f:
+            partitions = pickle.load(f)
+        im_names = partitions['{}_im_names'.format(part)]
+        ids2labels = partitions['{}_ids2labels'.format(part)]
+        return im_names, ids2labels
+
+    def _get_sample(self, id_):
+        """ Get images names sequence by id """
+        inds = self.ids_to_im_inds[id_]
+        replace = len(inds) < self.ims_per_id
+        inds = self.rng.choice(inds, self.ims_per_id, replace=replace)
+        im_names = [self.im_names[ind] for ind in inds]
+        return im_names
+
+    def reinit_queue(self, shuffle=True):
+        """ Update image sequence and shuffle ids if shuffle=True """
+        self.ids = self.ids_orig.copy()
+        if shuffle:
+            self.rng.shuffle(self.ids)
+        self.image_queue = [self._get_sample(id_) for id_ in self.ids]
+        self.label_queue = [[self.ids2labels[id_]] * self.ims_per_id for id_ in self.ids]
+
+    def __getitem__(self, index):
+        """ Get image and info by index
+
+        Returns:
+          image in numpy format
+          image label
+        """
+        # Shuffle data on epoch start (dont work for distributed sampler)
+        if index == 0:
+            self.reinit_queue(shuffle=True)
+        # Update index by rank
+        index = self.index_shift + index
+        # Get id index and image queue local index
+        ind_id = index // self.ims_per_id
+        ind_el = index % self.ims_per_id
+        im_name = os.path.join(self.im_dir, self.image_queue[ind_id][ind_el])
+        label = self.label_queue[ind_id][ind_el]
+
+        img = Image.open(im_name).convert('RGB')
+        img = np.asarray(img)
+
+        return img, label
+
+    def __len__(self):
+        """ Dataset length """
+        return len(self.image_queue) // self.group_size * self.ims_per_id
+
+
+class ReIDSequenceDataset:
+    """ Test dataset
 
     Args:
-        dataset_path(string): the path of dataset.
-        do_train(bool): whether dataset is used for train or eval.
-        repeat_num(int): the repeat times of dataset. Default: 1
-        batch_size(int): the batch size of dataset. Default: 32
-        target(str): the device target. Default: Ascend
-        distribute(bool): data for distribute or not. Default: False
-        enable_cache(bool): whether tensor caching service is used for eval. Default: False
-        cache_session_id(int): If enable_cache, cache session_id need to be provided. Default: None
-
-    Returns:
-        dataset
+        im_dir: path to image folder
+        partition_file: Path to partition pkl file
+        part: part of data for evaluation
     """
-    device_num, rank_id = _get_rank_info(distribute)
+    def __init__(
+            self,
+            im_dir=None,
+            partition_file=None,
+            part='test',
+    ):
+        # The im dir of all images
+        self.im_dir = im_dir
+        self.im_names, self.marks = self._get_dataset_values(partition_file, part)
 
-    if device_num == 1:
-        data_set = ds.ImageFolderDataset(dataset_path, num_parallel_workers=get_num_parallel_workers(8), shuffle=True)
-    else:
-        data_set = ds.ImageFolderDataset(dataset_path, num_parallel_workers=get_num_parallel_workers(2), shuffle=True,
-                                         num_shards=device_num, shard_id=rank_id)
+    @property
+    def num_classes(self):
+        """ Number of classes in dataset (0 for evaluation) """
+        return 0
 
-    mean = [0.485 * 255, 0.456 * 255, 0.406 * 255]
-    std = [0.229 * 255, 0.224 * 255, 0.225 * 255]
+    @staticmethod
+    def _get_dataset_values(partition_file, part='test'):
+        """ Get images info from partition_file
 
-    # define map operations
-    if do_train:
-        trans = [
-            C.RandomCropDecodeResize(train_image_size, scale=(0.08, 1.0), ratio=(0.75, 1.333)),
-            C.RandomHorizontalFlip(prob=0.5),
-            C.Normalize(mean=mean, std=std),
-            C.HWC2CHW()
+        Args:
+            partition_file: Path to partition pkl file
+            part: part of data for evaluation
+
+        Returns:
+            image names
+            image marks
+        """
+        with open(partition_file, 'rb') as f:
+            partitions = pickle.load(f)
+        im_names = partitions['{}_im_names'.format(part)]
+        marks = partitions['{}_marks'.format(part)]
+        return im_names, marks
+
+    def __getitem__(self, index):
+        """ Get image and info by index
+
+        Returns:
+          image in numpy format
+          image info:
+            person id
+            camera id
+            image mark
+        """
+        name = self.im_names[index]
+        im_name = os.path.join(self.im_dir, name)
+        label = [
+            parse_im_name(name, 'id'),
+            parse_im_name(name, 'cam'),
+            self.marks[index]
         ]
-    else:
-        trans = [
-            C.Decode(),
-            C.Resize(256),
-            C.CenterCrop(eval_image_size),
-            C.Normalize(mean=mean, std=std),
-            C.HWC2CHW()
-        ]
+        img = Image.open(im_name).convert('RGB')
+        img = np.asarray(img)
 
-    type_cast_op = C2.TypeCast(mstype.int32)
+        return img, label
 
-    data_set = data_set.map(operations=trans, input_columns="image", num_parallel_workers=4)
-    # only enable cache for eval
-    if do_train:
-        enable_cache = False
-    if enable_cache:
-        if not cache_session_id:
-            raise ValueError("A cache session_id must be provided to use cache.")
-        eval_cache = ds.DatasetCache(session_id=int(cache_session_id), size=0)
-        data_set = data_set.map(operations=type_cast_op, input_columns="label",
-                                num_parallel_workers=get_num_parallel_workers(2),
-                                cache=eval_cache)
-    else:
-        data_set = data_set.map(operations=type_cast_op, input_columns="label",
-                                num_parallel_workers=get_num_parallel_workers(2))
-
-    # apply batch operations
-    data_set = data_set.batch(batch_size, drop_remainder=True)
-
-    # apply dataset repeat operation
-    data_set = data_set.repeat(repeat_num)
-
-    return data_set
-
-def create_dataset3(dataset_path, do_train, repeat_num=1, batch_size=32, train_image_size=224, eval_image_size=224,
-                    target="Ascend", distribute=False, enable_cache=False, cache_session_id=None):
-    """
-    create a train or eval imagenet2012 dataset for resnet101
-    Args:
-        dataset_path(string): the path of dataset.
-        do_train(bool): whether dataset is used for train or eval.
-        repeat_num(int): the repeat times of dataset. Default: 1
-        batch_size(int): the batch size of dataset. Default: 32
-        target(str): the device target. Default: Ascend
-        distribute(bool): data for distribute or not. Default: False
-        enable_cache(bool): whether tensor caching service is used for eval. Default: False
-        cache_session_id(int): If enable_cache, cache session_id need to be provided. Default: None
-
-    Returns:
-        dataset
-    """
-    device_num, rank_id = _get_rank_info(distribute)
-    if device_num == 1:
-        data_set = ds.ImageFolderDataset(dataset_path, num_parallel_workers=get_num_parallel_workers(8), shuffle=True)
-    else:
-        data_set = ds.ImageFolderDataset(dataset_path, num_parallel_workers=get_num_parallel_workers(8), shuffle=True,
-                                         num_shards=device_num, shard_id=rank_id)
-
-    mean = [0.475 * 255, 0.451 * 255, 0.392 * 255]
-    std = [0.275 * 255, 0.267 * 255, 0.278 * 255]
-
-    # define map operations
-    if do_train:
-        trans = [
-            C.RandomCropDecodeResize(train_image_size, scale=(0.08, 1.0), ratio=(0.75, 1.333)),
-            C.RandomHorizontalFlip(rank_id / (rank_id + 1)),
-            C.Normalize(mean=mean, std=std),
-            C.HWC2CHW()
-        ]
-    else:
-        trans = [
-            C.Decode(),
-            C.Resize(256),
-            C.CenterCrop(eval_image_size),
-            C.Normalize(mean=mean, std=std),
-            C.HWC2CHW()
-        ]
-
-    type_cast_op = C2.TypeCast(mstype.int32)
-
-    data_set = data_set.map(operations=trans, input_columns="image", num_parallel_workers=get_num_parallel_workers(8))
-    # only enable cache for eval
-    if do_train:
-        enable_cache = False
-    if enable_cache:
-        if not cache_session_id:
-            raise ValueError("A cache session_id must be provided to use cache.")
-        eval_cache = ds.DatasetCache(session_id=int(cache_session_id), size=0)
-        data_set = data_set.map(operations=type_cast_op, input_columns="label",
-                                num_parallel_workers=get_num_parallel_workers(8),
-                                cache=eval_cache)
-    else:
-        data_set = data_set.map(operations=type_cast_op, input_columns="label",
-                                num_parallel_workers=get_num_parallel_workers(8))
-
-    # apply batch operations
-    data_set = data_set.batch(batch_size, drop_remainder=True)
-    # apply dataset repeat operation
-    data_set = data_set.repeat(repeat_num)
-
-    return data_set
+    def __len__(self):
+        """ Dataset length """
+        return len(self.im_names)
 
 
-def create_dataset4(dataset_path, do_train, repeat_num=1, batch_size=32, train_image_size=224, eval_image_size=224,
-                    target="Ascend", distribute=False, enable_cache=False, cache_session_id=None):
-    """
-    create a train or eval imagenet2012 dataset for se-resnet50
+def statistic_normalize_img(img, statistic_norm, mean, std):
+    """Statistic normalize images."""
+    # img: RGB
+    if isinstance(img, Image.Image):
+        img = np.array(img)
+    img = img / 255.
+    if statistic_norm:
+        img = (img - mean) / std
+    return img
+
+
+def _reshape_data(image, image_size, mean, std):
+    """Reshape image."""
+    if not isinstance(image, Image.Image):
+        image = Image.fromarray(image)
+    ori_w, ori_h = image.size
+    ori_image_shape = np.array([ori_w, ori_h], np.int32)
+    h, w = image_size
+
+    image = image.resize((w, h), Image.BILINEAR)
+    image_data = statistic_normalize_img(image, statistic_norm=True, mean=mean, std=std)
+    if len(image_data.shape) == 2:
+        image_data = np.expand_dims(image_data, axis=-1)
+        image_data = np.concatenate([image_data, image_data, image_data], axis=-1)
+    image_data = image_data.astype(np.float32)
+
+    return image_data, ori_image_shape
+
+
+def reshape_fn(image, label, image_size, mean, std):
+    """ Function to process image and label """
+    image, _ = _reshape_data(image, image_size=image_size, mean=mean, std=std)
+    return image, label.astype(np.int32)
+
+
+def create_dataset(
+        image_folder,
+        partition_file,
+        ims_per_id=4,
+        ids_per_batch=32,
+        batch_size=None,
+        rank=0,
+        group_size=1,
+        resize_h_w=(256, 128),
+        num_parallel_workers=8,
+        mean=(0.485, 0.456, 0.406),
+        std=(0.229, 0.224, 0.225),
+        istrain=True,
+        return_len=False,
+):
+    """ Crate dataloader for ReID
 
     Args:
-        dataset_path(string): the path of dataset.
-        do_train(bool): whether dataset is used for train or eval.
-        repeat_num(int): the repeat times of dataset. Default: 1
-        batch_size(int): the batch size of dataset. Default: 32
-        target(str): the device target. Default: Ascend
-        distribute(bool): data for distribute or not. Default: False
-        enable_cache(bool): whether tensor caching service is used for eval. Default: False
-        cache_session_id(int): If enable_cache, cache session_id need to be provided. Default: None
+        image_folder: path to image folder
+        partition_file: Path to partition pkl file
+        ims_per_id: number of ids in batch
+        ids_per_batch: number of imager per id
+        batch_size: batch size (if None then batch_size=ims_per_id*ids_per_batch)
+        rank: process id
+        group_size: device number
+        resize_h_w: height and width of image
+        num_parallel_workers: number of parallel workers
+        mean: image mean value for normalization
+        std: image std value for normalization
+        istrain: is train data
+        return_len: return dataset len
 
     Returns:
-        dataset
+
     """
-    device_num, rank_id = _get_rank_info(distribute)
-    ds.config.set_prefetch_size(64)
-    if device_num == 1:
-        data_set = ds.ImageFolderDataset(dataset_path, num_parallel_workers=get_num_parallel_workers(12), shuffle=True)
+    part = 'trainval' if istrain else 'test'
+    flip_prob = 0.5 if istrain else 0
+
+    mean = np.array(mean)
+    std = np.array(std)
+
+    if batch_size is None:
+        batch_size = ids_per_batch * ims_per_id
+
+    if istrain:
+        reid_dataset = TrainReIDSequenceDataset(
+            image_folder,
+            partition_file,
+            ims_per_id=ims_per_id,
+            part=part,
+            rank=rank,
+            group_size=group_size,
+        )
     else:
-        data_set = ds.ImageFolderDataset(dataset_path, num_parallel_workers=get_num_parallel_workers(12), shuffle=True,
-                                         num_shards=device_num, shard_id=rank_id)
+        reid_dataset = ReIDSequenceDataset(
+            image_folder,
+            partition_file,
+            part=part,
+        )
 
-    mean = [123.68, 116.78, 103.94]
-    std = [1.0, 1.0, 1.0]
+    dataset = ds.GeneratorDataset(
+        source=reid_dataset,
+        column_names=['image', 'label'],
+        shuffle=False,
+    )
 
-    # define map operations
-    if do_train:
-        trans = [
-            C.RandomCropDecodeResize(train_image_size, scale=(0.08, 1.0), ratio=(0.75, 1.333)),
-            C.RandomHorizontalFlip(prob=0.5),
-            C.Normalize(mean=mean, std=std),
-            C.HWC2CHW()
-        ]
+    compose_map_func = (lambda image, img_id: reshape_fn(image, img_id, resize_h_w, mean=mean, std=std))
+
+    change_swap_op = C.HWC2CHW()
+
+    if flip_prob > 0:
+        rand_flip = C.RandomHorizontalFlip(flip_prob)
+        trans = [rand_flip, change_swap_op]
     else:
-        trans = [
-            C.Decode(),
-            C.Resize(292),
-            C.CenterCrop(eval_image_size),
-            C.Normalize(mean=mean, std=std),
-            C.HWC2CHW()
-        ]
+        trans = [change_swap_op]
 
-    type_cast_op = C2.TypeCast(mstype.int32)
-    data_set = data_set.map(operations=trans, input_columns="image", num_parallel_workers=get_num_parallel_workers(12))
-    # only enable cache for eval
-    if do_train:
-        enable_cache = False
-    if enable_cache:
-        if not cache_session_id:
-            raise ValueError("A cache session_id must be provided to use cache.")
-        eval_cache = ds.DatasetCache(session_id=int(cache_session_id), size=0)
-        data_set = data_set.map(operations=type_cast_op, input_columns="label",
-                                num_parallel_workers=get_num_parallel_workers(12),
-                                cache=eval_cache)
-    else:
-        data_set = data_set.map(operations=type_cast_op, input_columns="label",
-                                num_parallel_workers=get_num_parallel_workers(12))
+    dataset = dataset.map(
+        operations=compose_map_func,
+        input_columns=["image", "label"],
+        output_columns=["image", "label"],
+        column_order=["image", "label"],
+        num_parallel_workers=num_parallel_workers,
+    )
 
-    # apply batch operations
-    data_set = data_set.batch(batch_size, drop_remainder=True)
+    dataset = dataset.map(operations=trans, input_columns=["image"], num_parallel_workers=num_parallel_workers)
 
-    # apply dataset repeat operation
-    data_set = data_set.repeat(repeat_num)
+    dataset = dataset.batch(batch_size, drop_remainder=False)
 
-    return data_set
+    if return_len:
+        return dataset, reid_dataset.num_classes, len(reid_dataset)
 
-def _get_rank_info(distribute):
-    """
-    get rank size and rank id
-    """
-    if distribute:
-        init()
-        rank_id = get_rank()
-        device_num = get_group_size()
-    else:
-        rank_id = 0
-        device_num = 1
-    return device_num, rank_id
-
-def get_num_parallel_workers(num_parallel_workers):
-    """
-    Get num_parallel_workers used in dataset operations.
-    If num_parallel_workers > the real CPU cores number, set num_parallel_workers = the real CPU cores number.
-    """
-    cores = multiprocessing.cpu_count()
-    if isinstance(num_parallel_workers, int):
-        if cores < num_parallel_workers:
-            print("The num_parallel_workers {} is set too large, now set it {}".format(num_parallel_workers, cores))
-            num_parallel_workers = cores
-    else:
-        print("The num_parallel_workers {} is invalid, now set it {}".format(num_parallel_workers, min(cores, 8)))
-        num_parallel_workers = min(cores, 8)
-    return num_parallel_workers
+    return dataset, reid_dataset.num_classes
