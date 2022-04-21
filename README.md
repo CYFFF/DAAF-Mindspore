@@ -73,7 +73,7 @@ For convenience, we provide a [docker](https://docs.docker.com/) image which inc
 docker load -i name.tar
 
 # create container
-docker run -it -d --cap-add sys_ptrace --name=DAAF_mindspore --runtime=nvidia --ipc=host -p 6022:22 -v /home/cyf:/home/cyf 3f92e31ea696 /bin/bash
+docker run -it -d --cap-add sys_ptrace --name=DAAF_mindspore --runtime=nvidia --ipc=host -p 6022:22 -v /home/cyf:/home/cyf 1683c3860cc5 /bin/bash
 ```
 
 ## [Running scripts](#contents)
