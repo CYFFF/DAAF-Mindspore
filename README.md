@@ -15,7 +15,7 @@
 
 Deep attention aware feature learning is designed for person ReID task. Our method adds two branches from the backbone network at training stage so as to guide the backbone being able to learn global and local attention aware features. The PAB forces the separated groups of feature channels focus on predefined body parts by predicting their corresponding keypoints. The HAB branch predicts the mask of a person and restricts the backbone network to focus on person bodies instead of background. PAB and HAB do not influence the testing stage, thus the same inference time and model size are maintained compared with the backbone network.
 
-[Paper](https://arxiv.org/pdf/2003.00517): Chen, Y., Wang, H., Sun, X., Fan, B., Tang, C. and Zeng, H., 2022. Deep attention aware feature learning for person re-identification. Pattern Recognition, 126, p.108567.
+[Paper](https://arxiv.org/pdf/2003.00517): Deep attention aware feature learning for person re-identification
 
 ## [Model Architecture](#contents)
 
@@ -25,11 +25,11 @@ We implement our method on the basis of widely used [TriNet](https://github.com/
 
 | layer | \#channels in | \#channels out | kernel size | stride |
 |-------|---------------|----------------|-------------|--------|
-| deconv 1 | 2048 (HAB) 341 (PAB) | 64 | $3\times3$ | 2 |
-| deconv 2 | 64 | 64 | $3\times3$ | 2 |
-| deconv 3 | 64 | 64 | $3\times3$ | 2 |
-| deconv 4 | 64 | 64 | $3\times3$ | 2 |
-|$1\times1$ conv | 64 | 1 (HAB) keypoint groups (PAB)  | $1\times1$ | 1 |
+| deconv 1 | 2048 (HAB) 341 (PAB) | 64 | 3x3 | 2 |
+| deconv 2 | 64 | 64 | 3x3 | 2 |
+| deconv 3 | 64 | 64 | 3x3 | 2 |
+| deconv 4 | 64 | 64 | 3x3 | 2 |
+| 1x1 conv | 64 | 1 (HAB) keypoint groups (PAB)  | 1x1 | 1 |
 
 ## [Data Prepare](#contents)
 
