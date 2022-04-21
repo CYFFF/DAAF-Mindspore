@@ -1,4 +1,4 @@
-# Copyright 2021 Huawei Technologies Co., Ltd
+# Copyright 2022 Huawei Technologies Co., Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,6 +49,7 @@ def get_job_id():
     job_id = os.getenv('JOB_ID')
     job_id = job_id if job_id != "" else "default"
     return job_id
+
 
 def sync_data(from_path, to_path):
     """

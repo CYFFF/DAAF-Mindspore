@@ -31,19 +31,19 @@ from model_utils.config import get_config
 from model_utils.device_adapter import get_device_id, get_device_num
 from model_utils.moxing_adapter import moxing_wrapper
 from src.callbacks import SavingLossMonitor, SavingTimeMonitor
-from src.dataset import create_dataset_DAAF_training
+from src.dataset import create_dataset
 from src.loss import DAAF_Loss
 from src.lr_schedule import get_step_lr
-from src.network import DAAF, ModelLossFusion
+from src.network import DAAF
+import numpy as np
 
-# context.set_context(mode=context.PYNATIVE_MODE, device_target="GPU")
+context.set_context(mode=context.PYNATIVE_MODE, device_target="GPU")
 set_seed(1)
 config = get_config()
 
 
 def modelarts_pre_process():
     """ Modelarts pre process function """
-
     def unzip(zip_file, save_dir):
         import zipfile
         s_time = time.time()
@@ -165,7 +165,7 @@ def run_train():
     """ Run train """
     _prepare_configuration()
 
-    dataset = create_dataset_DAAF_training(
+    dataset = create_dataset(
         config.data_dir,
         ims_per_id=config.ims_per_id,
         ids_per_batch=config.ids_per_batch,
@@ -181,6 +181,7 @@ def run_train():
 
     network = DAAF(num_classes=config.n_classes, pretrained_backbone=config.pre_trained_backbone)
 
+
     # pre_trained
     if config.pre_trained:
         print('Load model from', config.pre_trained)
@@ -188,10 +189,16 @@ def run_train():
     elif not config.pre_trained_backbone:
         raise ValueError('Training must start from pretrain!')
 
+    # reid_loss = MGNLoss(
+    #     config.global_loss_margin,
+    #     config.g_loss_weight,
+    #     config.id_loss_weight,
+    # )
+
     reid_loss = DAAF_Loss(
-        config.margin,
-        config.mask_loss_weight,
-        config.keypt_loss_weight,
+        config.global_loss_margin,
+        config.g_loss_weight,
+        config.id_loss_weight,
     )
 
     lr = get_step_lr(
@@ -217,6 +224,7 @@ def run_train():
         config.log_interval = batch_num
 
     if config.rank_print_ckpt_flag:
+
         loss_cb = SavingLossMonitor(
             per_print_times=config.log_interval,
             logfile=logfile,
@@ -237,13 +245,14 @@ def run_train():
         )
         callbacks.append(ckpt_cb)
 
-    modelLossFusion = ModelLossFusion(network, reid_loss)
-
     model = Model(
-        modelLossFusion,
+        network,
+        loss_fn=reid_loss,
         optimizer=opt,
     )
-    model.train(config.max_epoch, dataset, callbacks=callbacks, dataset_sink_mode=False)
+    x = Tensor(np.zeros((32, 3, 256, 128)).astype(np.float32))
+    y = network(x)
+    print(y)
 
 
 if __name__ == '__main__':

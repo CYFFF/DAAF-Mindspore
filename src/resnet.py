@@ -1,4 +1,4 @@
-# Copyright 2021 Huawei Technologies Co., Ltd
+# Copyright 2022 Huawei Technologies Co., Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,13 +35,13 @@ def _conv7x7(in_channel, out_channel, stride=1):
 
 def _bn(channel):
     """ Intermediate BatchNorm layer """
-    return nn.BatchNorm2d(channel, eps=1e-3, momentum=0.997,
+    return nn.BatchNorm2d(channel, eps=1e-5, momentum=0.9,
                           gamma_init=1, beta_init=0, moving_mean_init=0, moving_var_init=1)
 
 
 def _bn_last(channel):
     """ Last BatchNorm layer """
-    return nn.BatchNorm2d(channel, eps=1e-3, momentum=0.997,
+    return nn.BatchNorm2d(channel, eps=1e-5, momentum=0.9,
                           gamma_init=0, beta_init=0, moving_mean_init=0, moving_var_init=1)
 
 
@@ -65,7 +65,9 @@ class ResidualBlock(nn.Cell):
     def __init__(self,
                  in_channel,
                  out_channel,
-                 stride=1):
+                 stride=1,
+                 down_sample_layer=False,
+                 ):
         super(ResidualBlock, self).__init__()
         self.stride = stride
         channel = out_channel // self.expansion
@@ -84,7 +86,9 @@ class ResidualBlock(nn.Cell):
             self.down_sample = True
         self.down_sample_layer = None
 
-        if self.down_sample:
+        if down_sample_layer:
+            self.down_sample_layer = down_sample_layer
+        elif self.down_sample:
             self.down_sample_layer = nn.SequentialCell([_conv1x1(in_channel, out_channel, stride), _bn(out_channel)])
         self.add = P.Add()
 
